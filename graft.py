@@ -3,8 +3,10 @@
 FastVideo's FastH3 checkpoint is, weight for weight, the MiniMax-H3 fl2va model. Comparing the
 two bf16 releases tensor by tensor: all 532 shared tensors match in shape *and* dtype, and the
 entire transformer trunk (attn qkv/out + mlp fc1/fc2, ~21.5 B of the 22 B parameters) differs by
-at most **2.4e-4 in absolute terms** — below one bf16 step for any weight above 0.0625, so
-85-95% of those elements are bit-identical. Reconstructing FastH3 as "fl2va + the parts that
+only a bounded ABSOLUTE amount, never a relative one. Per tensor that bound is always an exact
+bf16 step: 2^-12 for 136 of the 208 trunk matrices, 2^-11 for 60, 2^-10 for 12. Relative
+Frobenius delta runs 7e-5 to 7e-4 and 72-96% of elements are bit-identical, so large weights are
+untouched while tiny ones move a step. Reconstructing FastH3 as "fl2va + the parts that
 actually changed" lands within 1.08e-4 relative Frobenius error of the real checkpoint.
 
 What genuinely differs is only two things:
@@ -55,6 +57,36 @@ from comfy.ldm.minimax.model import MiniMaxH3Model
 GATE_SUFFIX = ".to_gate_compress.weight"
 
 
+def _unpack_int4(packed: torch.Tensor, in_features: int) -> torch.Tensor:
+    """[o, i//2] uint8, two nibbles per byte -> [o, i] int8 in [-7, 7]."""
+    out = torch.empty(packed.shape[0], in_features, dtype=torch.int8)
+    out[:, 0::2] = (packed & 0xF).to(torch.int8) - 8
+    out[:, 1::2] = ((packed >> 4) & 0xF).to(torch.int8) - 8
+    return out
+
+
+def dequantize_gate(qdata: torch.Tensor, qscale: torch.Tensor) -> torch.Tensor:
+    """Rebuild a gate weight from a quantised patch.
+
+    The scheme is read off the tensors rather than trusted from metadata, so a patch still
+    loads if its metadata is stripped:
+
+      int8 per-row     qdata int8  [o, i],     qscale [o]
+      int4 group-128   qdata uint8 [o, i//2],  qscale [o, groups]
+    """
+    if qdata.dtype == torch.int8 and qscale.ndim == 1:
+        return qdata.float() * qscale[:, None].float()
+    if qdata.dtype == torch.uint8 and qscale.ndim == 2:
+        groups = qscale.shape[1]
+        in_features = qdata.shape[1] * 2
+        q = _unpack_int4(qdata, in_features).float().view(qdata.shape[0], groups, -1)
+        return (q * qscale[:, :, None].float()).view(qdata.shape[0], in_features)
+    raise ValueError(
+        f"unrecognised gate quantisation: qdata {qdata.dtype} {tuple(qdata.shape)}, "
+        f"qscale {qscale.dtype} {tuple(qscale.shape)}"
+    )
+
+
 @dataclass
 class GraftReport:
     """What a single patch application actually changed."""
@@ -63,6 +95,7 @@ class GraftReport:
     buffers: int = 0
     gates: int = 0
     added_bytes: int = 0
+    quantized: bool = False
     unmatched: list[str] = field(default_factory=list)
 
     @property
@@ -76,11 +109,12 @@ class GraftReport:
         if self.buffers:
             parts.append(f"{self.buffers} buffers")
         if self.gates:
-            parts.append(f"{self.gates} VSA gate layers ({self.added_bytes / 1e9:.2f} GB)")
+            how = " dequantised" if self.quantized else ""
+            parts.append(f"{self.gates}{how} VSA gate layers ({self.added_bytes / 1e9:.2f} GB)")
         return ", ".join(parts) if parts else "nothing"
 
 
-def _graft_gate(patcher, block, index: int, weight: torch.Tensor) -> int:
+def _graft_gate(patcher, block, index: int, weight: torch.Tensor, model_dtype=None) -> int:
     """Build the Linear that fl2va never instantiated, and hang it on the block's attention.
 
     The ops class is taken from the block's own `qkv_proj` rather than hardcoded, so the gate
@@ -97,7 +131,12 @@ def _graft_gate(patcher, block, index: int, weight: torch.Tensor) -> int:
 
     linear_cls = type(reference)
     reference_weight = getattr(reference, "weight", None)
-    dtype = weight.dtype if reference_weight is None else reference_weight.dtype
+    # Prefer the reference's own dtype; fall back to the dtype the model was built with. Never
+    # fall back to the incoming weight's: a dequantised gate arrives as float32, and building
+    # the gate from that would silently double its footprint (3.85 GB -> 7.71 GB).
+    dtype = (
+        reference_weight.dtype if reference_weight is not None else (model_dtype or weight.dtype)
+    )
     if not issubclass(linear_cls, torch.nn.Linear):
         # A quantized checkpoint's Linear (comfy.ops MixedPrecisionOps) is not an nn.Linear and
         # never creates a plain `.weight` -- it expects a quantized tensor with scales, loaded
@@ -105,7 +144,6 @@ def _graft_gate(patcher, block, index: int, weight: torch.Tensor) -> int:
         # is nothing to quantize them against, so build an ordinary cast-aware Linear instead of
         # an empty quantized shell. It still casts to the input's device/dtype at forward time.
         linear_cls = comfy.ops.manual_cast.Linear
-        dtype = weight.dtype
 
     gate = linear_cls(
         in_features,
@@ -140,8 +178,8 @@ def apply_patch(model, state_dict: dict[str, torch.Tensor], name: str = "patch")
     report = GraftReport()
 
     for key, value in state_dict.items():
-        if key.endswith(GATE_SUFFIX):
-            continue  # needs a module built for it; handled below
+        if GATE_SUFFIX in key:
+            continue  # needs a module built for it; handled below (plain or quantised)
         target = params.get(key)
         is_param = target is not None
         if target is None:
@@ -165,10 +203,17 @@ def apply_patch(model, state_dict: dict[str, torch.Tensor], name: str = "patch")
             report.buffers += 1
 
     for index, block in enumerate(getattr(diffusion_model, "blocks", [])):
-        weight = state_dict.get(f"blocks.{index}.attn{GATE_SUFFIX}")
+        base = f"blocks.{index}.attn{GATE_SUFFIX}"
+        weight = state_dict.get(base)
         if weight is None:
-            continue
-        report.added_bytes += _graft_gate(patcher, block, index, weight)
+            qdata, qscale = state_dict.get(base + ".qdata"), state_dict.get(base + ".qscale")
+            if qdata is None or qscale is None:
+                continue
+            weight = dequantize_gate(qdata, qscale)
+            report.quantized = True
+        report.added_bytes += _graft_gate(
+            patcher, block, index, weight, getattr(diffusion_model, "dtype", None)
+        )
         report.gates += 1
 
     if report.gates:

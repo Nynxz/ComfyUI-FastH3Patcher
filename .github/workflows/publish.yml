@@ -1,0 +1,23 @@
+name: Publish to Comfy registry
+on:
+    workflow_dispatch:
+
+jobs:
+    publish-node:
+        name: Publish Custom Node to registry
+        runs-on: ubuntu-latest
+        if: ${{ github.repository_owner == 'Nynxz' }}
+        steps:
+            - uses: actions/checkout@v4
+            - uses: actions/setup-python@v5
+              with:
+                  python-version: '3.12'
+
+            - run: pip install comfy-cli
+
+            # This pack is pure Python: no web/ half, so there is no bundle to build or stage
+            # before publishing. comfy-cli archives git-tracked files, which is all of it.
+            - name: Publish to the ComfyUI registry
+              run: comfy node publish --token "$REGISTRY_TOKEN"
+              env:
+                  REGISTRY_TOKEN: ${{ secrets.REGISTRY_ACCESS_TOKEN }}

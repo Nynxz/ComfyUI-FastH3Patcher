@@ -1,0 +1,49 @@
+[project]
+name = "comfyui-fasth3patcher"
+version = "0.1.0"
+description = "Run FastVideo's FastH3 as a 149 MB patch on MiniMax-H3 fl2va instead of a 44 GB checkpoint."
+authors = [{ name = "Nynxz", email = "contact@nynxz.com" }]
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+classifiers = []
+# torch and safetensors ship with ComfyUI, and the patch format is plain safetensors read
+# through comfy.utils.load_torch_file — nothing else is needed.
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/Nynxz/ComfyUI-FastH3Patcher"
+BugTracker = "https://github.com/Nynxz/ComfyUI-FastH3Patcher/issues"
+
+[tool.comfy]
+PublisherId = "nynxz"
+DisplayName = "FastH3 Patcher"
+Icon = "https://avatars.githubusercontent.com/u/60878743?v=4"
+Tags = ["minimax", "h3", "fastvideo", "fasth3", "video", "distillation", "sparse-attention"]
+Repository = "https://github.com/Nynxz/ComfyUI-FastH3Patcher"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["temp", "__pycache__", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM", "BLE", "RUF"]
+ignore = [
+    # `ruff format` owns code line width; E501 only fires on comments/docstrings it leaves alone.
+    "E501",
+    # Typography in prose is deliberate: "->" and "--" appear in tooltips and docstrings users read.
+    "RUF001",
+    "RUF002",
+    "RUF003",
+    # A short if/else is often clearer than a long ternary.
+    "SIM108",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# The tests cannot import the pack until `_harness.load()` has put a ComfyUI checkout on
+# sys.path, so their imports are deliberately below module-level code.
+"tests/*" = ["E402"]
+
+[tool.ruff.format]
+docstring-code-format = true

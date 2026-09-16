@@ -1,6 +1,6 @@
 [project]
 name = "comfyui-fasth3patcher"
-version = "0.1.0"
+version = "0.1.1"
 description = "Run FastVideo's FastH3 as a 149 MB patch on MiniMax-H3 fl2va instead of a 44 GB checkpoint."
 authors = [{ name = "Nynxz", email = "contact@nynxz.com" }]
 readme = "README.md"

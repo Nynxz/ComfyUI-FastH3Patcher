@@ -15,7 +15,10 @@ downloading a second 44 GB checkpoint.
 
 ### Full FastH3 checkpoint vs. fl2va + patch
 
-<video src="https://github.com/Nynxz/ComfyUI-FastH3Patcher/raw/main/.github/assets/example_1.mp4" controls muted loop></video>
+
+
+https://github.com/user-attachments/assets/7e60cec1-61e1-494b-80d5-dd5acd611eff
+
 
 ▶ [example_1.mp4](https://github.com/Nynxz/ComfyUI-FastH3Patcher/raw/main/.github/assets/example_1.mp4) · 🧩 [example workflow](https://github.com/Nynxz/ComfyUI-FastH3Patcher/raw/main/.github/assets/video_fastvideo_fasth3_t2v_patched.json) — drag onto the canvas
 
